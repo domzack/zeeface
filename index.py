@@ -6,6 +6,14 @@ from deepface import DeepFace
 import os
 import sys
 
+PATH_IMAGES = {
+    "referencia": "./src/referencia",  # Banco de imagens de referência
+    "processadas": "./src/imagens_processadas",  # Imagens processadas
+    "recortar": "./src/recortar",  # Imagens para recortar rostos
+    "teste": "./src/imagens_teste",  # Imagens de teste
+    "faces": "./src/faces",  # Pasta para salvar rostos recortados
+}
+
 
 def verificar_banco_referencias(caminho_referencias):
     if not os.path.exists(caminho_referencias) or not os.listdir(caminho_referencias):
@@ -66,11 +74,200 @@ def limpar_pasta_temp(caminho_temp):
     os.rmdir(caminho_temp)
 
 
-def main():
+def normalizar_nomes(caminho_origem, prefixo="TBB"):
+    """
+    Renomeia todas as imagens no diretório especificado para um nome padrão e converte para .jpg se necessário.
+
+    Args:
+        caminho_origem (str): Caminho do diretório contendo as imagens.
+        prefixo (str): Prefixo para os nomes das imagens renomeadas.
+    """
+    extensoes_validas = [".jpg", ".jpeg", ".png"]
+    imagens = listar_imagens(caminho_origem, extensoes_validas)
+
+    if not imagens:
+        print("Nenhuma imagem encontrada para renomear.")
+        return
+
+    for i, imagem_nome in enumerate(imagens, start=1):
+        extensao = os.path.splitext(imagem_nome)[1].lower()
+        novo_nome = f"{prefixo}-{i:02d}.jpg"
+        caminho_antigo = os.path.join(caminho_origem, imagem_nome)
+        caminho_novo = os.path.join(caminho_origem, novo_nome)
+
+        # Converte para .jpg se necessário
+        if extensao != ".jpg":
+            imagem = cv2.imread(caminho_antigo)
+            cv2.imwrite(caminho_novo, imagem)
+            os.remove(caminho_antigo)
+        else:
+            os.rename(caminho_antigo, caminho_novo)
+
+        print(f"Renomeado: {imagem_nome} -> {novo_nome}")
+
+
+def normalizar_referencias(caminho_referencia):
+    """
+    Renomeia imagens em subdiretórios de referência para o padrão {identidade}-01.jpg.
+
+    Args:
+        caminho_referencia (str): Caminho do diretório contendo as subpastas de identidades.
+    """
+    if not os.path.exists(caminho_referencia):
+        print(f"O caminho {caminho_referencia} não existe.")
+        return
+
+    for identidade in os.listdir(caminho_referencia):
+        caminho_identidade = os.path.join(caminho_referencia, identidade)
+        if not os.path.isdir(caminho_identidade):
+            continue
+
+        extensoes_validas = [".jpg", ".jpeg", ".png"]
+        imagens = listar_imagens(caminho_identidade, extensoes_validas)
+
+        if not imagens:
+            print(f"Nenhuma imagem encontrada para a identidade: {identidade}")
+            continue
+
+        for i, imagem_nome in enumerate(imagens, start=1):
+            extensao = os.path.splitext(imagem_nome)[1].lower()
+            novo_nome = f"{identidade}-{i:02d}.jpg"
+            caminho_antigo = os.path.join(caminho_identidade, imagem_nome)
+            caminho_novo = os.path.join(caminho_identidade, novo_nome)
+
+            # Converte para .jpg se necessário
+            if extensao != ".jpg":
+                imagem = cv2.imread(caminho_antigo)
+                cv2.imwrite(caminho_novo, imagem)
+                os.remove(caminho_antigo)
+            else:
+                os.rename(caminho_antigo, caminho_novo)
+
+            print(f"Renomeado: {imagem_nome} -> {novo_nome}")
+
+
+def extrair_faces(caminho_origem, caminho_destino):
+    """
+    Recorta rostos de imagens no diretório especificado e salva no diretório de destino.
+
+    Args:
+        caminho_origem (str): Caminho do diretório contendo as imagens para recorte.
+        caminho_destino (str): Caminho do diretório onde os rostos recortados serão salvos.
+    """
+    criar_diretorio(caminho_destino)
+    extensoes_validas = [".jpg", ".jpeg", ".png"]
+    imagens = listar_imagens(caminho_origem, extensoes_validas)
+
+    if not imagens:
+        print("Nenhuma imagem encontrada para recortar.")
+        return
+
+    contador = 1
+    for imagem_nome in imagens:
+        caminho_imagem = os.path.join(caminho_origem, imagem_nome)
+        imagem = cv2.imread(caminho_imagem)
+
+        if imagem is None:
+            print(f"Erro ao carregar a imagem: {imagem_nome}")
+            continue
+
+        faces = detectar_faces(imagem)
+        if not faces:
+            print(f"Nenhuma face detectada em {imagem_nome}.")
+            continue
+
+        for face in faces:
+            x, y, w, h = face["box"]
+            face_crop = imagem[y : y + h, x : x + w]
+
+            # Gera um nome único para o arquivo
+            while True:
+                nome_arquivo = f"face-{contador:02d}.jpg"
+                caminho_arquivo = os.path.join(caminho_destino, nome_arquivo)
+                if not os.path.exists(caminho_arquivo):
+                    break
+                contador += 1
+
+            cv2.imwrite(caminho_arquivo, face_crop)
+            print(f"Rosto salvo em: {caminho_arquivo}")
+            contador += 1
+
+        # Caso nenhuma face seja identificada, salve a imagem original na pasta de faces
+        if not faces:
+            while True:
+                nome_arquivo = f"nao-identificado-{contador:02d}.jpg"
+                caminho_arquivo = os.path.join(PATH_IMAGES["faces"], nome_arquivo)
+                if not os.path.exists(caminho_arquivo):
+                    break
+                contador += 1
+
+            cv2.imwrite(caminho_arquivo, imagem)
+            print(f"Imagem sem rosto salva em: {caminho_arquivo}")
+            contador += 1
+
+
+def processar_imagem(
+    imagem, faces, caminho_temp, caminho_faces, modelos, caminho_referencias
+):
+    """
+    Processa as faces detectadas em uma imagem. Salva as faces não identificadas na pasta de faces.
+
+    Args:
+        imagem (numpy.ndarray): Imagem original.
+        faces (list): Lista de faces detectadas.
+        caminho_temp (str): Caminho para salvar temporariamente as faces.
+        caminho_faces (str): Caminho para salvar faces não identificadas.
+        modelos (list): Modelos de reconhecimento facial.
+        caminho_referencias (str): Caminho do banco de referências.
+    """
+    criar_diretorio(caminho_faces)
+
+    for i, face in enumerate(faces):
+        x, y, w, h = face["box"]
+        face_crop = imagem[y : y + h, x : x + w]
+
+        # Salva temporariamente a face para reconhecimento
+        nome_face_temp = os.path.join(caminho_temp, f"temp_face_{i+1}.jpg")
+        cv2.imwrite(nome_face_temp, face_crop)
+
+        identidade = reconhecer_face(nome_face_temp, caminho_referencias, modelos)
+
+        if identidade != "Desconhecido":
+            # Adiciona o nome abaixo do quadro e desenha o quadro azul
+            texto_x = x
+            texto_y = y + h + 20  # Posiciona o texto abaixo do quadro
+            cv2.putText(
+                imagem,
+                identidade,
+                (texto_x, texto_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 0, 0),
+                2,
+            )
+            cv2.rectangle(imagem, (x, y), (x + w, y + h), (255, 0, 0), 2)
+        else:
+            # Apenas desenha o quadro vermelho para desconhecidos
+            cv2.rectangle(imagem, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+            # Salva a face não identificada na pasta de faces
+            contador = 1
+            while True:
+                nome_arquivo = f"nao-identificado-{contador:02d}.jpg"
+                caminho_arquivo = os.path.join(caminho_faces, nome_arquivo)
+                if not os.path.exists(caminho_arquivo):
+                    break
+                contador += 1
+
+            cv2.imwrite(caminho_arquivo, face_crop)
+            print(f"Face não identificada salva em: {caminho_arquivo}")
+
+
+def processar_deteccao_face():
     # Configurações
-    CAMINHO_IMAGENS = "./imagens"  # Diretório atual
-    CAMINHO_REFERENCIAS = "./banco_referencias"
-    CAMINHO_SALVAR_IMAGENS = "./imagens_processadas"
+    CAMINHO_IMAGENS = PATH_IMAGES["teste"]
+    CAMINHO_REFERENCIAS = PATH_IMAGES["referencia"]
+    CAMINHO_SALVAR_IMAGENS = PATH_IMAGES["processadas"]
     CAMINHO_TEMP = "./temp"
     EXTENSOES_VALIDAS = [".jpg", ".jpeg", ".png"]
     MODELOS = ["VGG-Face", "Facenet", "ArcFace", "Dlib"]
@@ -94,7 +291,7 @@ def main():
             print("Processo interrompido pelo usuário.")
             break
 
-        print(f"Processando: {imagem_nome}")
+        # print(f"Processando: {imagem_nome}")
         caminho_imagem = os.path.join(CAMINHO_IMAGENS, imagem_nome)
         imagem = cv2.imread(caminho_imagem)
 
@@ -103,40 +300,21 @@ def main():
             print(f"Nenhuma face detectada em {imagem_nome}.")
             continue
 
-        for i, face in enumerate(faces):
-            x, y, w, h = face["box"]
-            face_crop = imagem[y : y + h, x : x + w]
-
-            # Salva temporariamente a face para reconhecimento na pasta temp
-            nome_face = os.path.join(CAMINHO_TEMP, f"temp_face_{i+1}.jpg")
-            cv2.imwrite(nome_face, face_crop)
-
-            identidade = reconhecer_face(nome_face, CAMINHO_REFERENCIAS, MODELOS)
-
-            if identidade != "Desconhecido":
-                # Adiciona o nome abaixo do quadro e desenha o quadro azul
-                texto_x = x
-                texto_y = y + h + 20  # Posiciona o texto abaixo do quadro
-                cv2.putText(
-                    imagem,
-                    identidade,
-                    (texto_x, texto_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (255, 0, 0),
-                    2,
-                )
-                cv2.rectangle(imagem, (x, y), (x + w, y + h), (255, 0, 0), 2)
-            else:
-                # Apenas desenha o quadro vermelho para desconhecidos
-                cv2.rectangle(imagem, (x, y), (x + w, y + h), (0, 0, 255), 2)
+        processar_imagem(
+            imagem,
+            faces,
+            CAMINHO_TEMP,
+            PATH_IMAGES["faces"],
+            MODELOS,
+            CAMINHO_REFERENCIAS,
+        )
 
         # Salva a imagem processada no diretório
         caminho_salvar = os.path.join(
             CAMINHO_SALVAR_IMAGENS, f"processado_{imagem_nome}"
         )
         cv2.imwrite(caminho_salvar, imagem)
-        print(f"Imagem processada salva em: {caminho_salvar}")
+        # print(f"Imagem processada salva em: {caminho_salvar}")
 
     limpar_pasta_temp(CAMINHO_TEMP)
     cv2.destroyAllWindows()
@@ -144,12 +322,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        # normalizar_nomes(PATH_IMAGES["teste"])
+        # normalizar_referencias(PATH_IMAGES["referencia"])
+        # extrair_faces(PATH_IMAGES["recortar"], PATH_IMAGES["faces"])
+        processar_deteccao_face()
     except KeyboardInterrupt:
         print("\nPrograma encerrado pelo usuário.")
         sys.exit(0)
-
-# Comando para conectar ao repositório remoto
-# Execute no terminal:
-# git remote add origin https://github.com/domzack/zeeface.git
-# git push -u origin main
